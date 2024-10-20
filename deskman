@@ -1,0 +1,119 @@
+#!/bin/bash
+
+declare -A config # Declare an associative array to hold project configuration.
+
+# Convert .desktop INI file into bash associative array.
+while read -r var1 var2; do
+	config["$var1"]="$var2" # Store key-value pairs from the .directory file into the config array.
+done < <(grep -vE '^\s*$|^#' ".directory") # Exclude empty lines and comments from the .directory file.
+
+# Check for errors
+if [[ -z $1 ]]; then # Check if an operation argument is provided.
+	echo -e "deskman needs an operation to perform!\nSee deskman --help for instructions."
+	exit 1
+elif [[ $1 == "--auto" ]] || [[ $1 == "-a" ]]; then # Check for the --auto or -a flag.
+	if [[ $2 != "--load" ]] && [[ $2 != "-l" ]] && [[ $2 != "-new" ]] && [[ $2 != "-n" ]]; then # Validate the second argument for --auto command.
+		echo -e "--auto only supports -l,--load and -n,--new!\nSee deskman --help for instructions."
+		exit 1
+	elif [[ $1 != "--save" ]] && [[ $1 != "-s" ]] && [[ $1 != "--close" ]] && [[ $1 != "-c" ]] && [[ $1 != "--load" ]] && [[ $1 != "-l" ]] && [[ $1 != "--new" ]] && [[ $1 != "-n" ]] && [[ $1 != "--auto" ]] && [[ $1 != "-a" ]] && [[ $1 != "--info" ]] && [[ $1 != "-i" ]] && [[ $1 != "--help" ]] && [[ $1 != "-h" ]]; then # Check for unsupported options.
+		echo -e "Unsupported option: $1 \nSee deskman --help for instructions."
+		exit 1
+	fi
+fi
+
+# Handle the save operation.
+if [[ $1 == "--save" ]] || [[ $1 == "-s" ]]; then
+	config['Hash']=$(find "${HOME}/Desktop" -type f ! -name '.directory' -exec cat {} + | sha256sum | awk '{print $1}') # Calculate the hash of the files in the Desktop directory (excluding .directory).
+	sed -i "s/Hash=.*/Hash=${config['Hash']}/g" ~/Desktop/.directory # Update the Hash in the .directory file.
+	tar -C ~/Desktop -c -S -p --preserve-order --atime-preserve --xattrs --selinux --acls --recursion . | xz -z -9e -T0 --lzma2=preset=9e,filter=x86 - > ~/local/desktop/"$config['Name']".tar.xz #Create a tar.xz archive of the desktop files.
+fi
+
+# Handle the close operation.
+if [[ $1 == "--close" ]] || [[ $1 == "-c" ]]; then
+	if [[ "${config['Hash']}" == "$(find "${HOME}/Desktop" -type f ! -name '.directory' -exec cat {} + | sha256sum | awk '{print $1}')" ]]; then # Check if the current project hash matches the hash of the files on the desktop.
+		# If the hashes match, clear the Desktop.
+		rm -r ~/Desktop/*
+		rm -r ~/Desktop/.*
+	else
+		kdialog --tile "Save Changes?" --warningyesnocancel "A project is open. Do you want to save all changes made to this project before closin? Selecting No will destroy all changes made to this project!" # Prompt the user to save changes before closing the project.
+		if [[ $? -eq 0 ]]; then
+			$0 --save # Save the project if user chooses yes.
+		elif [[ $? -eq 1 ]]; then # Wipe the desktop if user chooses no.
+			rm -r ~/Desktop/*
+			rm -r ~/Desktop/.*
+		fi # Do nothing if user chooses cancel.
+	fi
+fi
+
+# Handle the load operation.
+if [[ $1 == "--load" ]] || [[ $1 == "-l" ]]; then
+	if [[ -z "$(ls -A ~/Desktop)" ]]; then # Check if the Desktop is empty.
+		i=1
+		# Populate the radiolist with available project archives.
+		for file in ~/.local/desktop/*.tar.xz; do
+			filename=$(basename "$file" .tar.xz)
+			radiolist_items+="$i $filename off "
+			((i++))
+		done
+
+		selected_project=$(kdialog --radiolist "Select a project:" $radiolist_items) # Get the selected project from the radiolist.
+
+		if [[ -z "$selected_project" ]]; then
+			echo "No project selected. Aborting load operation."
+			exit 1
+		fi
+
+		tar -xf ~/.local/desktop/"${selected_project}".tar.xz -C ~/Desktop  # Extract the selected project's archive onto the Desktop.
+	else # Error if a project is already open.
+		kdialog --error "A project is already open. Close the project first."
+		exit 1
+	fi
+fi
+
+# Handle the new project operation.
+if [[ $1 == "--new" ]] || [[ $1 == "-n" ]]; then
+	if [[ -z "$(ls -A ~/Desktop)" ]]; then # Check if the Desktop is empty before creating a new project.
+		config['Hash']="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" # null hash for new project
+		config['Name']=$(kdialog --title "Project Name" --inputbox "enter a name for the project.") # Prompt for the project name.
+
+		if [[ $? -eq 0 ]] && [[ -n "${config["Name"]}" ]]; then # Check if the user provided a name.
+			# Create the .directory file for the new project.
+			echo -e "[Desktop Entry]\nIcon=user-desktop\nType=Directory" > ~/Desktop/.directory
+			echo -n "Name=" >> ~/Desktop/.directory
+			echo $config['Name'] >> ~/Desktop/.directory
+			echo -n "Hash=" >> ~/Desktop/.directory
+			echo $config['Hash'] >> ~/Desktop/.directory
+		fi
+	else # Error if a project is already open.
+		kdialog --error "A project is already open. Close the project first."
+		exit 1
+	fi
+fi
+
+# Handle the auto operation.
+if [[ $1 == '--auto' ]] || [[ $1 == '-a' ]]; then
+	# Save and close the current project
+	$0 --save
+	$0 --close
+
+	# Check for a second argument and act accordingly
+	if [[ $2 == '--load' ]] || [[ $2 == '-l' ]]; then
+		$0 --load # Load a project.
+	elif [[ $2 == '--new' ]] || [[ $2 == '-n' ]]; then
+		$0 --new # Create a new project.
+	else
+		kdialog --error "Please specify either --load or --new after --auto."
+	fi
+fi
+
+# Handle the info operation to display current project details.
+if [[ $1 == "--info" ]] || [[ $1 == "-i" ]]; then
+	for idx in "${!config[@]}"; do
+		echo "$idx => ${config[$idx]}" # Print key-value pairs in the config array.
+	done
+fi
+
+# Handle the help operation to display usage instructions.
+if [[ $1 == "--help" ]] || [[ $1 == "-h" ]]; then
+	echo -e "Usage: deskman [-s,--save,-c,--close,-l,--load,-n,--new,-i,--info]\ndeskman [-a,--auto] [-l,--load,-n,--new]\n-s,--save - Save the current project to an archive\n-c,--close - Wipe the desktop\n-l,--load - Extract a project's archive onto the desktop\n-n,--new - Initialize desktop with a new project\n-i,--info - Print information about currently loaded project\n-a,--auto -l,--load - save, close and load a new project\n-a,--auto -n,--new - save, close and initialize desktop for new project"
+fi
